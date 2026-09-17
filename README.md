@@ -70,6 +70,7 @@ python -m skysim --port 8000        # or: uvicorn skysim.api:app --reload
 | `GET` | `/sims/{sim}/objects` | all objects |
 | `GET`/`DELETE` | `/sims/{sim}/objects/{id}` | one object |
 | `PUT` | `/sims/{sim}/objects/{id}/command` | re-task in flight |
+| `POST` | `/sims/{sim}/objects/{id}/release` | release a search-and-rescue drone from a carrier aircraft (see below) |
 | `POST` | `/sims/{sim}/step` | advance by `seconds`, or `ticks` (default one tick); returns snapshot + events |
 | `GET` | `/sims/{sim}/events` | drain the event queue |
 
@@ -102,8 +103,44 @@ Every object flies one command, swappable at any time.
 | `hover` | thrust-vectoring station keeping (rotorcraft) | `waypoint`, `altitude_m` |
 | `follow` | trail another object at a standoff distance | `target_id`, `standoff_m` |
 | `ascent` | rocket pitch program: vertical, then a set attitude | `pitch_deg`, `pitch_over_s`, `heading_deg` |
+| `pursue` | close on a designated aircraft to attach a locator beacon | `target_id` (set via `release`, below) |
 
 `throttle` (0–1) overrides the autopilot's own setting in any mode.
+
+## Search and rescue
+
+An aircraft can release a small chase drone that flies itself onto a
+designated aircraft and attaches a locator beacon — for tracking a distressed
+or lost aircraft, not for anything destructive: there is no payload beyond the
+beacon, and the drone rides along afterward instead of doing anything to its
+target.
+
+```
+POST /sims/{sim}/objects/{carrier_id}/release
+{"target_id": 7, "profile": "sar_drone", "name": "beacon-1"}
+```
+
+The drone spawns clear of the carrier, inheriting its position and velocity,
+and flies `Mode.PURSUE` toward `target_id`. Once within the profile's
+`capture_radius_m` it attaches (event `beacon_attached`) and from then on
+rides at the target's exact position and velocity every tick — it stops
+flying itself and drops out of collision/proximity checks, the same as a
+beacon fixed to the fuselage. If the target is later removed from the sim,
+the drone detaches (`beacon_detached`) and goes back to flying on its own.
+
+Steering differs by airframe: a winged chase drone (`sar_drone`) cannot brake
+by reversing thrust, so it flies a converging pursuit course — proportional
+navigation, the standard convergent-tracking law behind any moving-target
+rendezvous, not something specific to weapons — rather than aiming at the
+target and being unable to stop in time. A thrust-vectoring (rotorcraft)
+drone servos straight onto the target instead, since it can brake in any
+direction.
+
+`sar_drone` catches anything flying well below its own ~260 m/s top speed —
+light aircraft, gliders, a descending or slowed airliner — but won't run down
+a jet airliner at cruise; only about 20 m/s faster, it cannot close the
+distance before its fuel runs out. That's a real fuel/speed budget, not a
+special case.
 
 ## Profiles
 
@@ -121,6 +158,7 @@ register your own with `skysim.register(Profile(...))`.
 | `high_alt_platform` | balloon | superpressure, floats around 25 km |
 | `dropsonde` | projectile | light, high drag, quick terminal velocity |
 | `cargo_capsule` | projectile | heavy unguided payload |
+| `sar_drone` | aircraft | fast fixed-wing chase drone, releases from a carrier to attach a SAR beacon |
 
 ## Events
 
@@ -128,7 +166,8 @@ Drained per step: `spawn`, `command`, `removed`, `fuel_exhausted`,
 `balloon_burst`, `proximity_alert` / `proximity_clear` (pairs closer than
 `separation_m`, using closest approach across the tick, not just endpoints),
 `collision` (radii overlap — both objects destroyed), `ground_contact`
-(`landed` under 12 m/s descent, otherwise `destroyed`), `exited_volume`.
+(`landed` under 12 m/s descent, otherwise `destroyed`), `exited_volume`,
+`sar_drone_released`, `beacon_attached`, `beacon_detached`.
 
 ## Layout
 

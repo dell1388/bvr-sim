@@ -114,9 +114,49 @@ class World:
         self._emit("command", id=body_id, mode=command.mode.value)
         return body
 
+    def release_sar_drone(
+        self, carrier_id: int, target_id: int, profile: str | Profile = "sar_drone",
+        name: str = "",
+    ) -> Body:
+        """Release a search-and-rescue drone from a carrier aircraft.
+
+        The drone inherits the carrier's position and velocity, then flies
+        Mode.PURSUE toward the designated aircraft to attach a locator
+        beacon -- see World._check_captures.
+        """
+        carrier = self.bodies.get(carrier_id)
+        target = self.bodies.get(target_id)
+        if carrier is None or not carrier.active:
+            raise ValueError(f"carrier {carrier_id} not available")
+        if target is None or not target.active:
+            raise ValueError(f"target {target_id} not available")
+        prof = profiles.get(profile) if isinstance(profile, str) else profile
+        if prof.capture_radius_m <= 0.0:
+            raise ValueError(f"profile {prof.name!r} cannot attach a beacon "
+                             "(capture_radius_m is 0)")
+
+        # Release behind and below the carrier -- clear of its airframe and
+        # wake, so the two do not immediately register as a collision.
+        clearance = carrier.profile.radius_m + prof.radius_m + 20.0
+        offset = (carrier.velocity.unit() * -clearance if carrier.velocity.mag > 1e-6
+                 else Vec3()) + UP * (-0.25 * clearance)
+        drone = self.spawn(
+            prof, carrier.position + offset, carrier.velocity, name=name,
+            command=Command(mode=Mode.PURSUE, target_id=target_id),
+        )
+        self._emit("sar_drone_released", id=drone.id, carrier_id=carrier_id,
+                   target_id=target_id)
+        return drone
+
     @property
     def active(self) -> list[Body]:
         return [b for b in self.bodies.values() if b.active]
+
+    @property
+    def flying(self) -> list[Body]:
+        """Active objects still under their own control -- excludes anything
+        that has attached to and is now riding with another object."""
+        return [b for b in self.bodies.values() if b.active and b.attached_to is None]
 
     @property
     def count(self) -> int:
@@ -268,7 +308,9 @@ class World:
         return (r0 + dr * s).mag
 
     def _check_pairs(self, prev: dict[int, Vec3]) -> None:
-        live = self.active
+        # A beacon riding attached to its target isn't a separate collision
+        # or traffic hazard -- it's part of that object now.
+        live = self.flying
         seen: set[tuple[int, int]] = set()
         for i, a in enumerate(live):
             for b in live[i + 1:]:
@@ -297,19 +339,64 @@ class World:
             self._conflicts.discard(key)
             self._emit("proximity_clear", ids=list(key))
 
+    # -- search-and-rescue beacons -----------------------------------------
+
+    def _slave_attached(self, dt: float) -> None:
+        """Carry along any drone that attached in an earlier tick.
+
+        It rides at its target's position and velocity -- a beacon fixed to
+        the fuselage -- until the target is no longer active, at which point
+        it detaches and goes back to flying (ballistic) on its own.
+        """
+        for body in self.bodies.values():
+            if not body.active or body.attached_to is None:
+                continue
+            target = self.bodies.get(body.attached_to)
+            if target is None or not target.active:
+                body.attached_to = None
+                body.command = Command(mode=Mode.BALLISTIC)
+                self._emit("beacon_detached", id=body.id, name=body.name,
+                           reason="target_lost")
+                continue
+            body.position = target.position
+            body.velocity = target.velocity
+            body.age_s += dt
+
+    def _check_captures(self, prev: dict[int, Vec3]) -> None:
+        """Attach any PURSUE drone that has closed to its capture radius."""
+        for body in self.flying:
+            if body.command.mode is not Mode.PURSUE or body.command.target_id is None:
+                continue
+            if body.profile.capture_radius_m <= 0.0:
+                continue
+            target = self.bodies.get(body.command.target_id)
+            if target is None or not target.active:
+                continue
+            miss = self._closest_approach(
+                prev.get(body.id, body.position), body.position,
+                prev.get(target.id, target.position), target.position)
+            if miss <= body.profile.capture_radius_m:
+                body.attached_to = target.id
+                body.position = target.position
+                body.velocity = target.velocity
+                self._emit("beacon_attached", id=body.id, name=body.name,
+                           target_id=target.id, target_name=target.name,
+                           position=target.position.to_dict())
+
     # -- the step --------------------------------------------------------
 
     def step(self, dt: float | None = None) -> None:
         """Advance the world one fixed tick."""
         h = self.dt if dt is None else dt
         prev_positions = {b.id: b.position for b in self.bodies.values()}
+        flying = self.flying
 
         demands: dict[int, control.Demand] = {}
-        for body in self.active:
+        for body in flying:
             target = self.bodies.get(body.command.target_id) if body.command.target_id else None
             demands[body.id] = control.solve(body, target)
 
-        for body in self.active:
+        for body in flying:
             demand = demands[body.id]
             prev_vel = body.velocity
             body.position, body.velocity = self._integrate(body, demand, h)
@@ -320,6 +407,8 @@ class World:
             self._burn_fuel(body, demand.throttle, h)
             self._post_update(body, prev_vel, h)
 
+        self._slave_attached(h)
+        self._check_captures(prev_positions)
         self._check_pairs(prev_positions)
 
         for body in self.active:

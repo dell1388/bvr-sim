@@ -1,8 +1,9 @@
 """A busy block of airspace: run with `python examples/demo.py`.
 
 Two airliners on crossing tracks, a light aircraft flying a waypoint, a camera
-drone trailing it, a weather balloon on its way up and a sounding rocket
-climbing out through the lot.
+drone trailing it, a weather balloon on its way up, a sounding rocket climbing
+out through the lot, and a search-and-rescue drone released to tag the light
+aircraft with a locator beacon.
 """
 from __future__ import annotations
 
@@ -34,6 +35,11 @@ def build() -> tuple[World, object]:
                 name="camera-drone",
                 command=Command(mode=Mode.HOVER, waypoint=Vec3(-8000, -8000, 0),
                                 altitude_m=400))
+
+    carrier = world.spawn("airliner", Vec3(-40000, -20000, 9500), heading_vector(60) * 235,
+                          name="sar-mothership",
+                          command=Command(mode=Mode.HOLD, altitude_m=9500, speed_mps=235))
+    world.release_sar_drone(carrier.id, survey.id, name="beacon-1")
 
     world.spawn("weather_balloon", Vec3(4000, -2000, 200), Vec3(0, 0, 2), name="sonde-lift")
     world.spawn("sounding_rocket", Vec3(25000, 25000, 10), Vec3(0, 0, 1), name="research-shot",

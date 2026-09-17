@@ -139,3 +139,51 @@ def test_delete_object_and_404s(client, sim):
     assert client.get(f"/sims/{sim}/objects/{obj['id']}").status_code == 404
     assert client.put(f"/sims/{sim}/objects/999/command",
                       json={"mode": "hold"}).status_code == 404
+
+
+def test_release_sar_drone_via_api(client, sim):
+    target = client.post(f"/sims/{sim}/objects", json={
+        "profile": "light_aircraft", "position": {"x": 0, "y": 0, "z": 1500},
+        "launch": {"heading_deg": 90, "speed_mps": 65},
+        "command": {"mode": "hold", "altitude_m": 1500, "speed_mps": 65},
+    }).json()
+    carrier = client.post(f"/sims/{sim}/objects", json={
+        "profile": "airliner", "position": {"x": -20000, "y": -3000, "z": 9000},
+        "launch": {"heading_deg": 70, "speed_mps": 230},
+        "command": {"mode": "hold", "altitude_m": 9000, "speed_mps": 230},
+    }).json()
+
+    drone = client.post(f"/sims/{sim}/objects/{carrier['id']}/release",
+                        json={"target_id": target["id"], "name": "beacon-1"}).json()
+    assert drone["command"]["mode"] == "pursue"
+    assert drone["command"]["target_id"] == target["id"]
+
+    attached = False
+    for _ in range(40):
+        result = client.post(f"/sims/{sim}/step", json={"seconds": 20}).json()
+        if any(e["kind"] == "beacon_attached" for e in result["events"]):
+            attached = True
+            break
+    assert attached
+
+    snap = client.get(f"/sims/{sim}/objects/{drone['id']}").json()
+    assert snap["attached_to"] == target["id"]
+
+
+def test_release_rejects_unequipped_profile_and_unknown_ids(client, sim):
+    target = client.post(f"/sims/{sim}/objects", json={
+        "profile": "light_aircraft", "position": {"x": 0, "y": 0, "z": 1500}}).json()
+    carrier = client.post(f"/sims/{sim}/objects", json={
+        "profile": "airliner", "position": {"x": -5000, "y": 0, "z": 9000}}).json()
+
+    bad_profile = client.post(f"/sims/{sim}/objects/{carrier['id']}/release",
+                              json={"target_id": target["id"], "profile": "cargo_capsule"})
+    assert bad_profile.status_code == 400
+
+    unknown_target = client.post(f"/sims/{sim}/objects/{carrier['id']}/release",
+                                 json={"target_id": 99999})
+    assert unknown_target.status_code == 404
+
+    unknown_carrier = client.post(f"/sims/{sim}/objects/99999/release",
+                                  json={"target_id": target["id"]})
+    assert unknown_carrier.status_code == 404

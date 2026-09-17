@@ -81,7 +81,8 @@ class LaunchState(BaseModel):
 
 
 class CommandModel(BaseModel):
-    mode: Literal["ballistic", "hold", "heading", "waypoint", "hover", "follow", "ascent"] = "ballistic"
+    mode: Literal["ballistic", "hold", "heading", "waypoint", "hover", "follow",
+                 "ascent", "pursue"] = "ballistic"
     heading_deg: float | None = None
     altitude_m: float | None = None
     speed_mps: float | None = None
@@ -116,6 +117,12 @@ class SpawnRequest(BaseModel):
     label: str = ""
     fuel_kg: float | None = None
     command: CommandModel | None = None
+
+
+class ReleaseRequest(BaseModel):
+    target_id: int = Field(..., description="object to designate for beacon attachment")
+    profile: str = Field("sar_drone", description="must have capture_radius_m > 0")
+    name: str = ""
 
 
 class StepRequest(BaseModel):
@@ -268,6 +275,28 @@ def set_command(sim_id: str, object_id: int, command: CommandModel) -> dict:
     with _lock:
         body = world.set_command(object_id, command.to_command())
     return body.to_dict()
+
+
+@app.post("/sims/{sim_id}/objects/{object_id}/release", status_code=201, tags=["objects"])
+def release_sar_drone(sim_id: str, object_id: int, req: ReleaseRequest) -> dict:
+    """Release a search-and-rescue drone from a carrier aircraft.
+
+    The drone inherits the carrier's position and velocity and flies
+    Mode.PURSUE toward `target_id`; once within its capture radius it
+    attaches a locator beacon and rides along (see GET .../objects for
+    `attached_to`).
+    """
+    world = _world(sim_id)
+    _object(world, object_id)
+    _object(world, req.target_id)
+    with _lock:
+        try:
+            drone = world.release_sar_drone(object_id, req.target_id, req.profile, req.name)
+        except WorldFull as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+    return drone.to_dict()
 
 
 @app.post("/sims/{sim_id}/step", tags=["run"])

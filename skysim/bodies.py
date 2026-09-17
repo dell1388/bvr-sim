@@ -28,6 +28,7 @@ class Mode(str, Enum):
     HOVER = "hover"          # rotorcraft: park over a point
     FOLLOW = "follow"        # trail another object at a standoff distance
     ASCENT = "ascent"        # rocket pitch program
+    PURSUE = "pursue"        # close on a designated aircraft to attach a beacon
 
 
 @dataclass(slots=True)
@@ -85,6 +86,9 @@ class Body:
     throttle: float = 0.0                 # 0..1, resolved each tick
     age_s: float = 0.0
     burst: bool = False                   # balloons: envelope has let go
+    # Search-and-rescue: set once a PURSUE drone reaches its target, after
+    # which it rides along with that object instead of flying itself.
+    attached_to: int | None = None
     # Set each tick by the control loop / integrator, reported in snapshots.
     thrust_dir: Vec3 = field(default_factory=lambda: UP)
     accel_cmd: Vec3 = field(default_factory=Vec3)
@@ -166,6 +170,7 @@ class Body:
             "throttle": round(self.throttle, 3),
             "age_s": round(self.age_s, 3),
             "burst": self.burst,
+            "attached_to": self.attached_to,
             "command": self.command.to_dict(),
         }
 

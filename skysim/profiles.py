@@ -39,6 +39,7 @@ class Profile:
     # Kind-specific
     volume_m3: float = 0.0        # displaced volume at sea level (balloons)
     expansion_ratio: float = 1.0  # how far the envelope can stretch (1 = rigid)
+    capture_radius_m: float = 0.0 # PURSUE-mode rendezvous range (0 = not equipped)
     burst_altitude_m: float = 0.0 # balloons: envelope bursts above this
     radius_m: float = 5.0         # collision radius
 
@@ -105,6 +106,14 @@ DROPSONDE = Profile(
     thrust_mode="none", radius_m=0.5,
 )
 
+SAR_DRONE = Profile(
+    name="sar_drone", kind="aircraft",
+    mass_kg=180.0, ref_area_m2=3.2, cd0=0.028, cl_max=1.3, aspect_ratio=8.0,
+    max_g=6.0, thrust_n=9000.0, fuel_kg=120.0, burn_rate_kgs=0.4,
+    thrust_mode="velocity", max_speed_mps=260.0, service_ceiling_m=15000.0,
+    radius_m=1.5, capture_radius_m=25.0,
+)
+
 CARGO_CAPSULE = Profile(
     name="cargo_capsule", kind="projectile",
     mass_kg=120.0, ref_area_m2=1.8, cd0=0.9, max_g=0.0,
@@ -132,7 +141,7 @@ def register(profile: Profile) -> Profile:
 
 
 for _p in (AIRLINER, LIGHT_AIRCRAFT, GLIDER, SURVEY_DRONE, SOUNDING_ROCKET,
-           WEATHER_BALLOON, HIGH_ALT_PLATFORM, DROPSONDE, CARGO_CAPSULE):
+           WEATHER_BALLOON, HIGH_ALT_PLATFORM, DROPSONDE, CARGO_CAPSULE, SAR_DRONE):
     register(_p)
 
 

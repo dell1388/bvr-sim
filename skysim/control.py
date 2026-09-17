@@ -115,6 +115,14 @@ def follow_demand(body: Body, cmd: Command, target: Body | None) -> Demand:
     return Demand(accel, throttle_for_speed(body, want_speed), _forward(body))
 
 
+def _vectored_thrust(body: Body, accel: Vec3) -> Demand:
+    """Convert a desired acceleration into a (throttle, thrust direction) pair
+    for a thrust-vectoring body -- there is no wing to ask for lift instead."""
+    thrust_n = max(1e-6, body.profile.thrust_n)
+    need = accel.mag * body.mass_kg
+    return Demand(Vec3(), _clamp01(need / thrust_n), _dir(accel))
+
+
 def hover_demand(body: Body, cmd: Command) -> Demand:
     """Thrust-vectoring station keeping: park over a point at an altitude."""
     wp = cmd.waypoint or body.position
@@ -126,9 +134,63 @@ def hover_demand(body: Body, cmd: Command) -> Demand:
     accel = (vel_want - body.velocity) * K_VEL
     accel = accel.clamp(body.profile.max_g * physics.G0)
     accel = accel + UP * physics.gravity_magnitude(body.altitude_m)
-    thrust_n = max(1e-6, body.profile.thrust_n)
-    need = accel.mag * body.mass_kg
-    return Demand(Vec3(), _clamp01(need / thrust_n), _dir(accel))
+    return _vectored_thrust(body, accel)
+
+
+def _los_rate_accel(pursuer_pos: Vec3, pursuer_vel: Vec3, target_pos: Vec3,
+                    target_vel: Vec3, gain: float) -> Vec3:
+    """Steering accel that nulls the line-of-sight rotation rate.
+
+    omega = (r x v_rel) / |r|^2 is how fast the bearing to the target is
+    swinging; driving it to zero puts the pursuer on a straight-line
+    intercept course. This is the standard convergent-pursuit law behind
+    any moving-target rendezvous or tracking task (docking, camera
+    gimbals, ball-catching robots) -- aiming at a lead point instead (pure
+    pursuit) looks similar but does not actually converge when the pursuer
+    is much faster than the target: it overshoots and loops, forever.
+    """
+    r = target_pos - pursuer_pos
+    rng2 = max(1.0, r.mag2)
+    v_rel = target_vel - pursuer_vel
+    omega = r.cross(v_rel) / rng2
+    return omega.cross(pursuer_vel) * gain
+
+
+def pursuit_demand(body: Body, cmd: Command, target: Body | None) -> Demand:
+    """Close on a moving aircraft to attach a search-and-rescue locator beacon.
+
+    Once within the profile's capture_radius_m the world attaches the
+    drone and it stops flying itself (see World._check_captures). Steering
+    is delivered as wing lift for a winged chase aircraft (line-of-sight
+    guidance -- a bank-and-turn airframe cannot brake, so it has to fly a
+    converging course rather than chase a point), or as vectored thrust for
+    a rotorcraft-style drone, which can simply servo onto the target
+    directly.
+    """
+    vectored = body.profile.thrust_mode == "vector"
+    if target is None or not target.active:
+        # Nothing to rendezvous with right now: hold position and wait.
+        if vectored:
+            return hover_demand(body, Command(mode=Mode.HOVER, waypoint=body.position,
+                                              altitude_m=body.altitude_m))
+        return hold_demand(body, Command(mode=Mode.HOLD))
+
+    speed_cap = max(1.0, body.profile.max_speed_mps)
+
+    if vectored:
+        rng = (target.position - body.position).mag
+        lead_s = min(6.0, rng / speed_cap)
+        aim_point = target.position + target.velocity * lead_s
+        vel_want = (aim_point - body.position).clamp(speed_cap)
+        accel = (vel_want - body.velocity) * K_VEL
+        accel = accel.clamp(body.profile.max_g * physics.G0)
+        accel = accel + UP * physics.gravity_magnitude(body.altitude_m)
+        return _vectored_thrust(body, accel)
+
+    accel = _los_rate_accel(body.position, body.velocity, target.position,
+                            target.velocity, gain=3.5)
+    accel = Vec3(accel.x, accel.y, 0.0) + UP * vertical_demand(body, target.altitude_m)
+    return Demand(accel, throttle_for_speed(body, speed_cap), _forward(body))
 
 
 def ascent_demand(body: Body, cmd: Command) -> Demand:
@@ -160,6 +222,8 @@ def solve(body: Body, target: Body | None = None) -> Demand:
         d = waypoint_demand(body, cmd)
     elif cmd.mode is Mode.FOLLOW:
         d = follow_demand(body, cmd, target)
+    elif cmd.mode is Mode.PURSUE:
+        d = pursuit_demand(body, cmd, target)
     else:                                      # HOLD and HEADING share a law
         d = hold_demand(body, cmd)
 

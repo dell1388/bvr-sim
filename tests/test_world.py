@@ -218,3 +218,82 @@ def test_determinism_same_inputs_same_trajectory():
         return plane.position.as_tuple()
 
     assert fly() == fly()
+
+
+def test_sar_drone_releases_chases_and_attaches_a_beacon():
+    world = World(dt=0.05, collisions=False, separation_m=0.0)
+    target = world.spawn("light_aircraft", Vec3(0.0, 0.0, 1500.0), heading_vector(90.0) * 65.0,
+                         name="distressed-aircraft",
+                         command=Command(mode=Mode.HOLD, altitude_m=1500.0, speed_mps=65.0))
+    carrier = world.spawn("airliner", Vec3(-20000.0, -3000.0, 9000.0), heading_vector(70.0) * 230.0,
+                          name="sar-mothership",
+                          command=Command(mode=Mode.HOLD, altitude_m=9000.0, speed_mps=230.0))
+    drone = world.release_sar_drone(carrier.id, target.id, name="beacon-1")
+    assert drone.command.mode is Mode.PURSUE
+    assert drone.command.target_id == target.id
+
+    attached_event = None
+    for _ in range(24000):
+        world.step()
+        for event in world.drain_events():
+            if event["kind"] == "beacon_attached":
+                attached_event = event
+        if attached_event:
+            break
+
+    assert attached_event is not None
+    assert attached_event["target_id"] == target.id
+    assert drone.attached_to == target.id
+
+    # It should now ride along with the target rather than fly on its own.
+    world.run(120.0)
+    assert (drone.position - target.position).mag == pytest.approx(0.0, abs=1e-6)
+    assert drone.velocity.as_tuple() == pytest.approx(target.velocity.as_tuple())
+    assert drone.status is Status.ACTIVE
+
+    # An attached beacon is not a separate collision or traffic hazard.
+    assert drone not in world.flying
+
+
+def test_sar_drone_detaches_if_its_target_is_lost():
+    world = World(dt=0.05, collisions=False, separation_m=0.0)
+    target = world.spawn("light_aircraft", Vec3(0.0, 0.0, 1500.0), heading_vector(90.0) * 65.0,
+                         command=Command(mode=Mode.HOLD, altitude_m=1500.0, speed_mps=65.0))
+    carrier = world.spawn("light_aircraft", Vec3(-2000.0, 0.0, 1500.0), heading_vector(90.0) * 65.0,
+                          command=Command(mode=Mode.HOLD, altitude_m=1500.0, speed_mps=65.0))
+    drone = world.release_sar_drone(carrier.id, target.id)
+    for _ in range(4000):
+        world.step()
+        if drone.attached_to:
+            break
+    assert drone.attached_to == target.id
+
+    world.remove(target.id)
+    world.step()
+    assert drone.attached_to is None
+    assert drone.command.mode is Mode.BALLISTIC
+    assert drone.status is Status.ACTIVE   # keeps flying on its own, doesn't vanish
+
+
+def test_release_requires_a_capable_profile_and_a_live_target():
+    world = World(dt=0.05, collisions=False)
+    target = world.spawn("light_aircraft", Vec3(0.0, 0.0, 1500.0), Vec3())
+    carrier = world.spawn("airliner", Vec3(-5000.0, 0.0, 9000.0), heading_vector(90.0) * 230.0)
+
+    with pytest.raises(ValueError, match="capture_radius_m"):
+        world.release_sar_drone(carrier.id, target.id, profile="cargo_capsule")
+
+    with pytest.raises(ValueError, match="not available"):
+        world.release_sar_drone(carrier.id, 9999, profile="sar_drone")
+
+
+def test_released_drone_does_not_collide_with_its_own_carrier():
+    world = World(dt=0.02, separation_m=0.0)
+    target = world.spawn("light_aircraft", Vec3(20000.0, 0.0, 1500.0), heading_vector(90.0) * 65.0,
+                         command=Command(mode=Mode.HOLD, altitude_m=1500.0, speed_mps=65.0))
+    carrier = world.spawn("airliner", Vec3(0.0, 0.0, 9000.0), heading_vector(90.0) * 230.0,
+                          command=Command(mode=Mode.HOLD, altitude_m=9000.0, speed_mps=230.0))
+    drone = world.release_sar_drone(carrier.id, target.id)
+    world.step()
+    assert drone.status is Status.ACTIVE
+    assert carrier.status is Status.ACTIVE
